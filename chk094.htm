@@ -1,0 +1,1245 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<html>
+<head>
+
+<meta http-equiv="Content-type" content="text/html;charset=UTF-8">
+<META name="keywords" content="draughts checkers game design javascript example">
+<style type="text/css">
+body
+{
+background-color:#ebebeb;
+}
+.blackcell
+{
+background-color:black;
+width:30;
+}
+.blackstat
+{
+background-color:black;
+text-align:center;
+color:LightGrey;
+font-size:9;
+}
+.redcell
+{
+background-color:red;
+width:30;
+}
+.redstat
+{
+background-color:red;
+text-align:center;
+color:white;
+font-size:9;
+}
+
+</style>
+<title> Checkers (v0.94) </title>
+
+<script language=javascript type="text/javascript">
+
+//
+// version: 0.94
+// blame: shardy@@differentchairs.com
+// http://www.differentchairs.com/checkers
+//
+// Initially tested on IE6, but ought to work on most 'modern' browsers...
+//
+// uses location image files..
+//                blank.gif
+//   base pieces: chkRed.gif, chkBlk.gif
+//         kings: chkRedK.gif, chkBlkK.gif
+//      selected: chk*S.gif
+//
+// change log:
+//   0.94 *cleaned up logic and sequencing (e.g., in DumbPlayer vs DumbPlayer)
+//        *added test mechanism
+//        *factored out ui interaction stuff
+//
+//   0.92 Now play against computer
+//        (derived the automated DumbPlayer from Player)
+//        *also add a MessageQueue - for now, Player just uses it
+//         in keeping a history of game moves.
+//        *clean markup.
+//
+//   0.91 refactored to use Board and Player object. Now we explicitly make
+//        two interactive (local) players for a game.
+//        *Player class still has too much knowledge about game rules to
+//         seamlessly plug in the Board from a different game.
+//        *May chose to factor out a GamePiece class from Board to
+//         simplify implementing a different game (e.g., chess)
+//
+//   toDo:
+//      -add capability for remote play. (RmtPlayer)
+//      -add a SmarterPlayer that can do move lookahead.
+
+// A Board tracks overall game state (layout/turn), & enforces most game rules
+//
+// (board implements a gameAccess interface, for use by optional UI object)
+//          gameAccess:getLoc(row,col)
+//          gameAccess:isTurn(color)
+//
+function Board(initialState) {
+    this.turnListener = [];
+    this.init(initialState);
+}
+
+Board.ColorEnum = {
+    ColorRED:'r',
+    ColorBLACK:'b'
+};
+
+
+Board.DIMEnum = {
+    RowCt:8,
+    ColCt:8
+};
+
+Board.otherColor = function(c) {
+    if (c===Board.ColorEnum.ColorRED) {
+        return Board.ColorEnum.ColorBLACK;
+    }
+    else {
+        return Board.ColorEnum.ColorRED;
+    }
+};
+
+Board.DefStartupState = "bbbbbbbbbbbb        rrrrrrrrrrrr";
+
+Board.prototype.init = function(initialState) {
+    var CELLCOUNT=32;
+    this.turn = 'r';
+    this.state = new Array(CELLCOUNT);
+    if (!initialState || !initialState.length ||
+            initialState.length!==CELLCOUNT ||
+            -1 !== initialState.search(/[^Bb Rr]/)) {
+        initialState = Board.DefStartupState;
+        // [    'b',    'b',    'b',    'b',
+        //  'b',    'b',    'b',    'b',
+        //      'b',    'b',    'b',    'b',
+        //  ' ',    ' ',    ' ',    ' ',
+        //      ' ',    ' ',    ' ',    ' ',
+        //  'r',    'r',    'r',    'r',
+        //      'r',    'r',    'r',    'r',
+        //  'r',    'r',    'r',    'r' ];
+    }
+    for (var i=0; i<CELLCOUNT; i++) {
+        this.state[i] = initialState.charAt(i);
+    }
+    this.log = "";
+};
+
+Board.prototype.bindUI = function(  UI ) {
+    this.ui = UI;
+};
+
+Board.rc2ndx = function(r, c) {
+    return r*Board.DIMEnum.ColCt/2 + (c-((r+1)%2))/2;
+};
+
+Board.rowEnumStart = function()  {return 0;};
+Board.rowEnumNext  = function(r) {return r+1;};
+Board.rowEnumEnd   = function()  {return Board.DIMEnum.RowCt;};
+
+Board.colEnumStart = function(r) {return (r%2)?0:1;};
+Board.colEnumNext  = function(c) {return c+2;};
+Board.colEnumEnd   = function()  {return Board.DIMEnum.ColCt;};
+
+Board.prototype.getLoc = function(r,c) {
+    return this.state[ Board.rc2ndx(r,c) ];
+    };
+
+Board.prototype.setLoc = function(r,c, piece) {
+    this.state[ Board.rc2ndx(r,c) ] = piece;
+    };
+
+Board.prototype.registerOnTurn = function(p) {
+    // p must implement onTurn method
+    this.turnListener.push( p );
+};
+
+Board.prototype.putlog = function(s) {
+    this.log = this.log + s;
+    return s;
+};
+
+Board.prototype.getlog = function() {
+    return this.log;
+};
+
+Board.prototype.isTurn = function(c) {
+    return this.turn===c;
+};
+
+Board.prototype.toggleTurn = function () {
+    this.turn = this.isTurn(Board.ColorEnum.ColorRED) ?
+                                Board.ColorEnum.ColorBLACK :
+                                Board.ColorEnum.ColorRED;
+    this.ui_showPrompt();
+    var self=this;
+    var onTurnNotify = function() {
+        for (var i=0; i<self.turnListener.length; i++) {
+            if (self.turnListener[i].onTurn()) {
+                break;
+                }
+            }
+        };
+    // yield briefly, to ensure UI updates
+    this.ui_yield( onTurnNotify );
+    };
+
+Board.prototype.beginPlay = function() {
+    this.ui && this.ui.init();
+    this.turn = Board.ColorEnum.ColorBLACK;
+    this.toggleTurn(); // bootstraps any initial automation
+};
+
+//
+// render the 'location' data (typically, after a move)
+//
+Board.prototype.ui_draw = function() {
+    this.ui && this.ui.draw();
+    };
+
+//
+// mark a piece as selected (to move)
+//
+Board.prototype.ui_selectCell = function(r,c)  {
+    this.ui && this.ui.selectCell(r,c);
+    };
+
+//
+// write move prompt
+//
+Board.prototype.ui_showPrompt = function() {
+    this.ui && this.ui.showPrompt();
+    };
+
+Board.prototype.ui_declareWinner = function(winner) {
+    if (this.ui) {
+        return this.ui.declareWinner(winner);
+        }
+    };
+
+Board.prototype.ui_yield = function(  fn, delay ) {
+
+    if (this.ui) {
+        return this.ui.yield(fn, delay);
+        }
+    else {
+        fn();
+        }
+    };
+
+
+//
+// call this at the end of each move. Check if either side has lost all pieces.
+//
+Board.prototype.chkWinner = function()  {
+    var result = 'Black';
+    var r;
+    var c;
+    // pieces left?
+    for (r=Board.rowEnumStart();
+            'Black'===result && r<Board.rowEnumEnd();
+            r=Board.rowEnumNext(r))
+        {
+        for (c=Board.colEnumStart(r);c<Board.colEnumEnd(); c=Board.colEnumNext(c))
+            {
+            if ('r'===this.getLoc(r,c) || 'R'===this.getLoc(r,c))
+                {
+                result = 0; // found a red
+                break;
+                }
+            }
+        }
+    if (0 !== result)
+        {
+        return result;
+        }
+    result = 'Red';
+    for (r=0;'Red'===result && r<8; r++) {
+        for (r=Board.rowEnumStart();
+                'Red'===result && r<Board.rowEnumEnd();
+                r=Board.rowEnumNext(r))
+            {
+            for (c=Board.colEnumStart(r);c<Board.colEnumEnd(); c=Board.colEnumNext(c))
+                {
+                if ('b'===this.getLoc(r,c) || 'B'===this.getLoc(r,c))
+                    {
+                    result = 0; // found a black
+                    break;
+                    }
+                }
+            }
+    }
+    return result;
+    };
+
+//
+// is the position occupied?
+//
+Board.prototype.isOpen = function(r,c) {
+    var result=0;
+    if (r>=0 && r<=7 && c>=0 && c<=7)
+        {
+        if (this.getLoc(r,c)===' ')
+            {
+            result = 1;
+            }
+        }
+    return result;
+    };
+
+//
+// is target (r2,c2) occupied by opponent of (r1,c1) ?
+//
+Board.prototype.isOpponent = function(r1,c1, r2,c2) {
+    var result = 0;
+    if (this.getLoc(r1,c1)==='b' || this.getLoc(r1,c1)==='B')
+        {
+        result = this.getLoc(r2,c2)==='r' || this.getLoc(r2,c2)==='R';
+        }
+    else if (this.getLoc(r1,c1)==='r' || this.getLoc(r1,c1)==='R')
+        {
+        result = this.getLoc(r2,c2)==='b' || this.getLoc(r2,c2)==='B';
+        }
+    return result;
+    };
+
+//
+// does given character x indicate a piece? (rRbB)
+//
+Board.prototype.isPiece = function(x) {
+    return x.toLowerCase()==='r' || x.toLowerCase()==='b';
+    };
+
+//
+// does given color have a legal move left?
+//
+Board.prototype.noMoreMoves = function(color) {
+    for (var r=Board.rowEnumStart();r<Board.rowEnumEnd(); r=Board.rowEnumNext(r))
+        {
+        for (var c=Board.colEnumStart(r);c<Board.colEnumEnd(); c=Board.colEnumNext(c))
+            {
+            if ( this.isPiece( this.getLoc(r,c) ) &&
+                this.getLoc(r,c).toLowerCase()===color.toLowerCase())
+                {
+                if (this.canMove(r,c))
+                    {
+                    return 0;
+                    }
+                }
+            }
+        }
+    return 1;
+    };
+
+//
+// is given position occupied by Red piece?
+//
+Board.prototype.isRed = function(r,c) {
+    return this.getLoc(r,c).toLowerCase()==='r';
+    };
+
+//
+// is given position occupied by Black piece?
+//
+Board.prototype.isBlack = function(r,c) {
+    return this.getLoc(r,c).toLowerCase()==='b';
+    };
+
+//
+// how many directions can piece legally jump (0-4) ?
+//
+Board.prototype.jumpCt = function(r,c) {
+    return (this.validJump(r,c,r-1,c-1) + this.validJump(r,c,r-1,c+1) +
+            this.validJump(r,c,r+1,c-1) + this.validJump(r,c,r+1,c+1));
+    };
+
+//
+// can piece legally move or jump?
+//
+Board.prototype.canMove = function(r,c) {
+    var result=0;
+
+    switch (this.getLoc(r,c))
+        {
+        case 'R':
+        if (this.isOpen(r+1,c-1) || this.validJump(r,c, r+1,c-1))
+            {
+            result = 1;
+            break;
+            }
+        if (this.isOpen(r+1,c+1) || this.validJump(r,c, r+1,c+1))
+            {
+            result = 1;
+            break;
+            }
+        // allow unmatched fall thru
+
+        case 'r':
+        if (this.isOpen(r-1,c-1) || this.validJump(r,c, r-1,c-1))
+            {
+            result = 1;
+            break;
+            }
+        if (this.isOpen(r-1,c+1) || this.validJump(r,c, r-1,c+1))
+            {
+            result = 1;
+            break;
+            }
+        break;
+
+        case 'B':
+        if (this.isOpen(r-1,c-1) || this.validJump(r,c, r-1,c-1))
+            {
+            result = 1;
+            break;
+            }
+        if (this.isOpen(r-1,c+1) || this.validJump(r,c, r-1,c+1))
+            {
+            result = 1;
+            break;
+            }
+        // allow unmatched fall thru
+
+        case 'b':
+        if (this.isOpen(r+1,c-1) || this.validJump(r,c, r+1,c-1))
+            {
+            result = 1;
+            break;
+            }
+        if (this.isOpen(r+1,c+1) || this.validJump(r,c, r+1,c+1))
+            {
+            result = 1;
+            break;
+            }
+        break;
+        }
+    return result;
+    };
+
+Board.prototype.isAdjacent = function(r0,c0, r1,c1) {
+    return  Math.abs(r0-r1)===1 &&
+            Math.abs(c0-c1)===1;
+};
+
+//
+// can piece legally move to specified loc?
+//
+Board.prototype.canMoveTo = function(r,c, rx,cx)    {
+    var result=0;
+
+    if (this.isAdjacent(r,c, rx,cx) && this.isOpen(rx,cx) ) {
+        switch (this.getLoc(r,c))
+            {
+            case 'R':
+                result = 1;
+                break;
+
+            case 'B':
+                result = 1;
+                break;
+
+            case 'r':
+            if (rx < r)
+                {
+                result = 1;
+                }
+            break;
+
+            case 'b':
+            if (rx > r)
+                {
+                result = 1;
+                }
+            break;
+            }
+    }
+    return result;
+    };
+
+//
+// can piece at (r0,c0) legally jump over or to (rx,cx)?
+//
+Board.prototype.validJump = function(r0,c0, rx,cx)  {
+    var result=0;
+    var diffR=Math.abs(rx-r0);
+    if (diffR==2){ //normalize
+        rx = (r0+rx)/2;
+        cx = (c0+cx)/2;
+    }
+    if (rx>0 && rx<7 && cx>0 && cx<7 &&
+        r0>=0&& r0<=7&& c0>=0&& c0<=7 ) {
+        var thisPiece = this.getLoc(r0,c0);
+        if (thisPiece==='r' && r0 < rx) { //filter backwards move
+            //
+            }
+        else if (thisPiece==='b' && r0 > rx){ // filter backwards move
+            //
+            }
+        else if (this.isOpponent(r0,c0, rx,cx))
+            {
+            if (this.isOpen(2*rx-r0,2*cx-c0)) {
+                result = 1; // rx,cx is jumpable opponent
+                }
+            }
+        }
+    return result;
+    };
+
+
+//
+// can piece at (r,c) legally jump anywhere?
+//
+Board.prototype.pieceCanJump = function(r,c) {
+    if (this.isPiece(this.getLoc(r,c)))
+        {
+        if (this.validJump(r,c, r+1,c+1)) { return 1; }
+        if (this.validJump(r,c, r+1,c-1)) { return 1; }
+        if (this.validJump(r,c, r-1,c+1)) { return 1; }
+        if (this.validJump(r,c, r-1,c-1)) { return 1; }
+        }
+    return 0;
+    };
+
+
+//
+// does given color have any legal jumps?
+//
+Board.prototype.sideCanJump = function(color) {
+    for (var r=Board.rowEnumStart();r<Board.rowEnumEnd(); r=Board.rowEnumNext(r))
+        {
+        for (var c=Board.colEnumStart(r);c<Board.colEnumEnd(); c=Board.colEnumNext(c))
+            {
+            if (this.getLoc(r,c).toLowerCase()===color.toLowerCase() &&
+                    this.pieceCanJump(r,c)  )
+                {
+                return 1;
+                }
+            }
+        }
+    return 0;
+    };
+
+// return 0/false if no jump occurred
+Board.prototype.move = function(fromR,fromC, toR, toC) {
+    var selPiece = this.getLoc(fromR,fromC);
+    var jmpCt = 0;
+    this.setLoc(toR,toC, selPiece); // !!! moveCmd...(this.selR, this.selC, r,c) ***********
+    //   moved = selPiece;
+    this.setLoc(fromR,fromC, ' '); // clear vacated location **********
+    var DiffR=Math.abs(toR-fromR);
+    var DiffC=Math.abs(toC-fromC);
+    if (DiffR!==DiffC) {
+        return 0;
+    }
+    if (DiffR<1 || DiffR>2) {
+        return 0;
+    }
+    var jump = (DiffR===2);
+    if (jump) {         // -------------------
+        var intR = (toR - fromR)/2 + fromR;
+        var intC = (toC - fromC)/2 + fromC;
+        if (!this.isOpponent(toR,toC, intR,intC))
+            {
+            return 0; // can only jump an opponent
+            }
+        this.setLoc(intR,intC,' '); // remove jumped opponent.
+    }
+    // note: official rules say we cant continue jumping after promote.
+    if (jump)
+        {
+        jmpCt = this.jumpCt(toR,toC);
+        }
+    if (toR===7 && this.isBlack(toR,toC))
+        {
+        this.setLoc(toR,toC, 'B'); // promote
+        }
+    else if (toR===0 && this.isRed(toR,toC))
+        {
+        this.setLoc(toR,toC, 'R');
+        }
+    return jmpCt;
+};
+
+
+Board.prototype.myTrace = function(n,r,c,r2,c2)  {
+    this.ui_showPrompt();
+    top.status = "["+r+","+c+"],["+r2+","+c2+"]" ;
+    };
+
+//
+// carry out a subsequent during multi-jump move.
+//
+Board.prototype.jumpIt = function(r,c,player) {
+    var row=r, col=c, p=player;
+    var self=this;
+
+    var whichJump = function() {
+        for (var i=-1; i<2; i+=2)
+            {
+            for (var j=-1; j<2; j+=2)
+                {
+                if (self.validJump(row,col, row+i,col+j))
+                    {
+                    p.chkMove(row+i,col+j);
+                    return;
+                    }
+                }
+            }
+        };
+    this.ui_yield( whichJump );
+    };
+
+//
+// is given position occupied by side whose turn it is?
+//
+Board.prototype.activeSideOwned = function(r,c) {
+    return (this.isRed(r,c) && this.turn==='r') ||
+            (this.isBlack(r,c) && this.turn==='b');
+    };
+
+
+function MessageQueue(game)
+{
+    this.theGame = game;
+    this.inbuf = "";
+    this.outbuf = "";
+}
+
+MessageQueue.prototype.put = function(msg) {
+    this.outbuf = this.outbuf + this.theGame.putlog( msg );
+};
+
+MessageQueue.prototype.flush = function() {
+    var content=this.outbuf;
+    this.theGame.putlog("\n");
+    this.outbuf = "";
+    return content;
+};
+
+// need a function to incoming command assembly and dispatch...
+MessageQueue.prototype.get = function() {
+    // just a dummy for now
+    return this.theGame.getlog();
+};
+
+
+// A Player creates or joins a game (Board), selects moves & tracks move state
+function Player(color) {
+    this.myColor = color;
+    this.unselectRC();
+    this.continuation = 0;
+    // leave gameBoard  and msgQ uninitialized until makeNewGame
+}
+
+//
+// reset state back to beginning of game. (other player must reJoin)
+//
+Player.prototype.makeNewGame = function(initialState) {
+    this.unselectRC();
+    this.continuation = 0;
+    this.gameBoard = new Board(initialState);
+    this.msgQ = new MessageQueue(this.gameBoard);
+};
+
+Player.prototype.restartGame = function() {
+    this.unselectRC();
+    this.continuation = 0;
+    this.gameBoard.init(); // uses default board layout
+    this.gameBoard.ui_draw();
+    this.gameBoard.ui_showPrompt();
+
+    var self=this;
+    var beginAgain = function() {
+        self.gameBoard.beginPlay();
+        };
+    // yield briefly, to ensure UI updates
+    this.gameBoard.ui_yield( beginAgain );
+};
+
+Player.prototype.getBoard = function() {
+    return this.gameBoard;
+    };
+
+Player.prototype.selectRC = function(r,c) {
+    var unsel = this.hasSelection();
+    this.selR = r;
+    this.selC = c;
+    if (unsel) {
+        this.getBoard().ui_draw();
+    }
+    this.gameBoard && this.gameBoard.ui_selectCell(r,c);
+    };
+
+Player.prototype.unselectRC = function() {
+    this.selR = -1;
+    this.selC = -1;
+    this.gameBoard && this.gameBoard.ui_draw();
+    };
+
+Player.prototype.getColor = function() {
+    return this.myColor;
+    };
+
+Player.prototype.joinGame = function(otherPlayer) {
+    // assert(otherPlayer provides valid board)
+    this.continuation = 0;
+    this.gameBoard = otherPlayer.getBoard();
+    this.msgQ = new MessageQueue(this.gameBoard);
+
+    this.unselectRC();
+    this.gameBoard.ui_showPrompt();
+};
+
+Player.prototype.isMyTurn = function()
+{
+    return this.getBoard().isTurn(this.myColor);
+};
+
+Player.prototype.jumpNowCriteria = function(r,c)
+{
+    return this.getBoard().jumpCt(r,c) === 1;
+};
+
+Player.prototype.hasSelection = function() {
+    return this.selR !== -1;
+};
+
+Player.prototype.isSelected = function(r,c) {
+    return (this.selR === r) && (this.selC == c);
+};
+
+Player.prototype.onTurn = function() {
+    // NOP by default
+};
+
+//
+// carry out a move to given position, or [de]select a piece to move, for side
+// whose turn it is. Check legality.
+//
+// (review: *might* simplify to only handle moves for self)
+//
+Player.prototype.chkMove = function(r,c) {
+    var jmpAgain=0;
+    var moved=0;
+    var jumped=0;
+    var shouldToggleTurn = 0;
+    var thisBoard = this.getBoard();
+    if (!this.hasSelection()) {
+        if  (thisBoard.activeSideOwned(r,c) &&
+            (thisBoard.pieceCanJump(r,c)||
+            !thisBoard.sideCanJump(thisBoard.getLoc(r,c)))) {
+            // either this piece can jump, or I have no other (required) jump
+            this.selectRC(r,c);
+        }
+        else {
+            // do nothing. Not selectable
+        }
+    }
+    else if (this.isSelected(r,c)) // unSelect?
+        {
+        // must disallow unselect if we landed here on continuation
+        if (this.continuation) { return; }
+        this.unselectRC();
+        }
+    else // can selected piece move to (or jump) rc?
+        {
+        if (thisBoard.validJump(this.selR,this.selC, r,c)) // is r,c jumpable?
+            {
+                if (thisBoard.isAdjacent(this.selR,this.selC, r,c)) {
+                    r = 2*r-this.selR; //normalize r,c to point past opponent
+                    c = 2*c-this.selC;
+                }
+            }
+        if (thisBoard.isOpen(r,c))
+            {
+            var selPiece = thisBoard.getLoc(this.selR,this.selC);
+            if ('r'===selPiece && r>this.selR)
+                {
+                return; // no backwards moves
+                }
+            if ('b'===selPiece && r<this.selR)
+                {
+                return; // no backwards moves
+                }
+            var DiffR=Math.abs(r-this.selR);
+            var DiffC=Math.abs(c-this.selC);
+
+            if (DiffR !== DiffC){
+                return; // only diagonal moves allowed
+                }
+            if (DiffR>2){
+                return; // single jumps max
+                }
+            if (DiffR===1 && thisBoard.pieceCanJump(this.selR,this.selC)) {
+                return; // a jump is required.
+                }
+            if (DiffR==2 &&
+                !thisBoard.validJump(this.selR,this.selC,r,c)) {
+                return;
+            }
+
+            moved = selPiece;
+            var pendingJmpCt = thisBoard.move(this.selR,this.selC, r, c);
+            var mvCmd = "mov(" + this.selR + "," + this.selC + "," + r + ","+c+")";
+            this.msgQ.put(mvCmd);
+            //top.status = mvCmd;
+            var movetrace = "";
+
+
+            if (pendingJmpCt>0) // not done yet
+                {
+                this.selectRC(r,c);
+                }
+            else // done with turn
+                {
+                this.unselectRC();
+                movetrace = this.msgQ.flush(); //in proxy scenario, transmit pending cmds
+                shouldToggleTurn = 1;
+                }
+            this.continuation = 0;
+            if (this.hasSelection()){
+                jmpAgain = this.jumpNowCriteria(r,c);
+                this.continuation = pendingJmpCt>1;
+                }
+            }
+            // at this point,
+            //    either
+            //         need to execute autoJump
+            //         or GameOver,
+            //         or turn over
+            //         or done (so return to ui control)
+            //
+            if (jmpAgain) {
+                thisBoard.jumpIt(this.selR,this.selC, this);
+                //this.continuation = this.hasSelection();
+            }
+            else if (moved &&
+                    thisBoard.noMoreMoves(Board.otherColor(this.getColor()))){
+                var whoJustMoved = //moved.toLowerCase()==='r'? 'Red':'Black';
+                    this.getColor()==='r'? 'Red':'Black';
+                if (thisBoard.ui_declareWinner(whoJustMoved)) {
+                    shouldToggleTurn = 0;
+                    this.restartGame();
+                }
+            }
+            else if (shouldToggleTurn) {
+                thisBoard.toggleTurn();
+            }
+        }
+    };
+
+
+//
+// GameUI (base NOP UI)
+//
+function GameUI(  ) {
+}
+GameUI.prototype.init          = function() {};
+GameUI.prototype.draw          = function() {};
+GameUI.prototype.selectCell    = function(row,col) {};
+GameUI.prototype.showPrompt    = function() {};
+GameUI.prototype.declareWinner = function(winner) {};
+GameUI.prototype.yield         = function(fn,delay) { fn(); };
+
+
+//
+// HtmlGameUI (standard browser UI)
+//
+function HtmlGameUI( hostBoard  ) {
+    GameUI.call(this);
+    this.host = hostBoard;
+    this.parent = this.prototype;
+}
+
+HtmlGameUI.prototype  = new GameUI();
+HtmlGameUI.superclass = GameUI.prototype;
+HtmlGameUI.prototype.constructor = HtmlGameUI;
+
+HtmlGameUI.prototype.init = function() {
+    this.draw();
+};
+
+HtmlGameUI.prototype.draw = function() {
+    for (var r=Board.rowEnumStart();r<Board.rowEnumEnd(); r=Board.rowEnumNext(r))
+        {
+        for (var c=Board.colEnumStart(r);c<Board.colEnumEnd(); c=Board.colEnumNext(c))
+            {
+            var content, cellID;
+            switch (this.host.getLoc(r,c))
+                {
+                case 'b':
+                content='<img src="chkBlk.gif">';
+                break;
+
+                case 'r':
+                content='<img src="chkRed.gif">';
+                break;
+
+                case 'B':
+                content='<img src="chkBlkK.gif">';
+                break;
+
+                case 'R':
+                content='<img src="chkRedK.gif">';
+                break;
+
+                case ' ':
+                content='<img src="blank.gif">';
+                break;
+                }
+            cellID = 'cell'+r+c;
+            document.getElementById( cellID ).innerHTML=content+"<br>";
+            }
+        }
+};
+
+HtmlGameUI.prototype.selectCell = function(r,c) {
+    var content, cellID;
+    switch (this.host.getLoc(r,c))
+        {
+        case 'b':
+        content='<img src="chkBlkS.gif">';
+        break;
+
+        case 'r':
+        content='<img src="chkRedS.gif">';
+        break;
+
+        case 'B':
+        content='<img src="chkBlkKS.gif">';
+        break;
+
+        case 'R':
+        content='<img src="chkRedKS.gif">';
+        break;
+
+        case ' ':
+        content='<img src="blank.gif">';
+        break;
+        }
+    cellID = 'cell'+r+c;
+    document.getElementById(cellID).innerHTML=content+"<br>";
+};
+
+HtmlGameUI.prototype.showPrompt    = function() {
+    if (this.host.isTurn(Board.ColorEnum.ColorRED))
+
+        {
+        document.getElementById("BlackSide").innerHTML = '...';
+        document.getElementById("RedSide").innerHTML = 'move: RED';
+        }
+    else
+        {
+        document.getElementById("RedSide").innerHTML = '...';
+        document.getElementById("BlackSide").innerHTML = 'move: BLACK';
+        }
+};
+
+HtmlGameUI.prototype.declareWinner = function(winner) {
+    return confirm(winner + ' Wins!\n\nPlay again?');
+};
+
+HtmlGameUI.prototype.yield         = function(fn,delay) {
+    return setTimeout( fn, delay?delay:300 );
+};
+
+
+//
+// DumbPlayer moves automatically and artlessly
+//
+function DumbPlayer(color) {
+    Player.call(this, color);
+    this.parent = this.prototype;
+}
+
+DumbPlayer.prototype  = new Player();
+DumbPlayer.superclass = Player.prototype;
+DumbPlayer.prototype.constructor = DumbPlayer;
+
+
+DumbPlayer.prototype.jumpNowCriteria = function(r,c)
+{
+    // don't go interactive (i.e., don't return ui control) when jumpCt>1
+    return this.getBoard().jumpCt(r,c) >= 1;
+};
+
+
+DumbPlayer.prototype.chkMove = function(r,c) {
+
+    // rewiring...we override the interactivity. onTurn automates
+    if (this.hasSelection()) {
+        if (this.getBoard().jumpCt(r,c) > 1) {
+            this.pickJump(r,c); // need to decide...
+            }
+        else {
+            // we're in a multijump move that the superclass automates
+            DumbPlayer.superclass.chkMove.call(this,r,c);
+            }
+    }
+    return;
+};
+
+// invoked when automated player must choose move branch
+DumbPlayer.prototype.pickJump = function(r,c) {
+    var thisBoard = this.getBoard();
+    if (thisBoard.validJump(r,c, r+1,c+1)) {
+        DumbPlayer.superclass.chkMove.call(this,r+1,c+1);
+        }
+    else if (thisBoard.validJump(r,c, r+1,c-1)) {
+        DumbPlayer.superclass.chkMove.call(this,r+1,c-1);
+        }
+    else if (thisBoard.validJump(r,c, r-1,c-1)) {
+        DumbPlayer.superclass.chkMove.call(this,r-1,c-1);
+        }
+    else if (thisBoard.validJump(r,c, r-1,c+1)) {
+        DumbPlayer.superclass.chkMove.call(this,r-1,c+1);
+        }
+};
+
+DumbPlayer.prototype.onTurn = function() {
+    var thisBoard = this.getBoard();
+    if (!thisBoard.isTurn(this.myColor)) {
+        return 0; //unhandled
+        }
+
+    var self=this;
+    var handleTurn = function() {
+            var r, c, dir, n, i;
+            if (thisBoard.sideCanJump( self.myColor )) {
+                // find a piece that can jump
+                for (r=Board.rowEnumStart();r<Board.rowEnumEnd(); r=Board.rowEnumNext(r))
+                    {
+                    for (c=Board.colEnumStart(r);c<Board.colEnumEnd(); c=Board.colEnumNext(c))
+                        {
+                        if (thisBoard.getLoc(r,c).toLowerCase()===self.myColor &&
+                                thisBoard.pieceCanJump(r,c) )
+                            {
+                            self.selectRC(r,c);
+                            thisBoard.ui_draw();
+                            // find where to jump
+                            self.pickJump(r,c);
+                            return;
+                            }
+                        }
+                    }
+            }
+            else if (!thisBoard.noMoreMoves( self.myColor )) {
+                // find a piece that can jump
+                dir = [
+                        [  1, 1 ],
+                        [  1,-1 ],
+                        [ -1, 1 ],
+                        [ -1,-1 ]
+                        ];
+                n = Math.floor( Math.random() * 4 ); // choose preferred direction randomly
+                for (r=Board.rowEnumStart();r<Board.rowEnumEnd(); r=Board.rowEnumNext(r)) {
+                    for (c=Board.colEnumStart(r);c<Board.colEnumEnd(); c=Board.colEnumNext(c)) {
+                        if (thisBoard.getLoc(r,c).toLowerCase()===self.myColor &&
+                                thisBoard.canMove(r,c)  ) {
+                            self.selectRC(r,c);
+                            thisBoard.ui_draw();
+                            // find where to move
+
+                            for (i=0; i<4; ++i) {
+                                var d = (i+n)%4;
+                                if (thisBoard.canMoveTo(r,c, r+dir[d][0],c+dir[d][1])) {
+                                    DumbPlayer.superclass.chkMove.call(self,r+dir[d][0],c+dir[d][1]);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            else {
+                // cannot move. I lose. (toDo: handle this unexpected case)
+            }
+        };
+    // yield briefly
+    thisBoard.ui_yield( handleTurn,1 );
+    return 1;
+
+
+};
+
+
+//
+// RmtPlayer has a board and a cmdPipe, but no UI
+//
+function RmtPlayer(color) {
+    Player.call(this, color);
+    this.parent = this.prototype;
+}
+
+RmtPlayer.prototype  = new Player();
+RmtPlayer.superclass = Player.prototype;
+RmtPlayer.prototype.constructor = RmtPlayer;
+
+
+// --------------------
+// Game is namespace for our top level functionality
+// --------------------
+function Game() {
+    }
+
+    Game.thisPlayer = 0;
+    Game.otherPlayer = 0;
+
+    Game.startupGame = function() {
+        var interactiveSelf = 1; // 1 or 0
+        var interactiveOpponent = 0; // or 1
+        var myColor = Board.ColorEnum.ColorRED; //or ColorBLACK
+        var startingBoardLayout; // leave uninitialized to get default board
+
+        // test board layouts...
+        var testCase =
+                [
+                //black wins on double jump
+                "bbbbbbbbb bbb    r    r         ",
+                //black wins after double jump branch
+                "        b    b  b b  b  rrr   B "
+                ];
+        // [    ' ',    ' ',    ' ',    ' ',//"    "
+        //  ' ',    ' ',    ' ',    ' ',    //"    "
+        //      'b',    ' ',    ' ',    ' ',//"b   "
+        //  ' ',    'b',    ' ',    ' ',    //" b  "
+        //      'b',    ' ',    'b',    ' ',//"b b "
+        //  ' ',    'b',    ' ',    ' ',    //" b  "
+        //      'r',    'r',    'r',    ' ',//"rrr "
+        //  ' ',    ' ',    'B',    ' ' ];  //"  B "
+
+        //startingBoardLayout = testCase[1];
+
+        Game.thisPlayer   = interactiveSelf ?
+                new Player( myColor ) :
+                new DumbPlayer( myColor );
+        Game.thisPlayer.makeNewGame( startingBoardLayout ); //(mk board/queue)
+
+        Game.otherPlayer = interactiveOpponent ?
+                new Player( Board.otherColor(Game.thisPlayer.getColor()) ) :
+                new DumbPlayer( Board.otherColor(Game.thisPlayer.getColor()) );
+
+        Game.otherPlayer.joinGame( Game.thisPlayer );
+        Game.otherPlayer.getBoard().registerOnTurn( Game.thisPlayer );
+        Game.otherPlayer.getBoard().registerOnTurn( Game.otherPlayer );
+        var ui = new HtmlGameUI( Game.otherPlayer.getBoard()  );
+        Game.otherPlayer.getBoard().bindUI( ui );
+        Game.otherPlayer.getBoard().beginPlay();
+    };
+
+    Game.chkMove = function(r,c) { //invokes appropriate handler
+        if (!Game.otherPlayer) { return; }
+
+        if (Game.otherPlayer.isMyTurn()) {
+            Game.otherPlayer.chkMove(r,c);
+        }
+        else {
+            Game.thisPlayer.chkMove(r,c);
+        }
+    };
+// --------------------
+
+</script>
+</head>
+
+
+<body  onload="Game.startupGame();">
+
+<table  border='1' >
+<tr>
+<td colspan=8 class="blackstat"><b><div ID="BlackSide">...</div></b>
+
+<tr>
+<td class="redcell"  ><br>
+<td class="blackcell"><div  ID="cell01" onclick="Game.chkMove(0,1)"></div>
+<td class="redcell"  ><br>
+<td class="blackcell"><div  ID="cell03" onclick="Game.chkMove(0,3)"></div>
+<td class="redcell"  ><br>
+<td class="blackcell"><div  ID="cell05" onclick="Game.chkMove(0,5)"></div>
+<td class="redcell"  ><br>
+<td class="blackcell"><div  ID="cell07" onclick="Game.chkMove(0,7)"></div>
+
+<tr>
+<td class="blackcell"><div  ID="cell10" onclick="Game.chkMove(1,0)"></div>
+<td class="redcell"  ><br>
+<td class="blackcell"><div  ID="cell12" onclick="Game.chkMove(1,2)"></div>
+<td class="redcell"  ><br>
+<td class="blackcell"><div  ID="cell14" onclick="Game.chkMove(1,4)"></div>
+<td class="redcell"  ><br>
+<td class="blackcell"><div  ID="cell16" onclick="Game.chkMove(1,6)"></div>
+<td class="redcell"  ><br>
+
+<tr>
+<td class="redcell"  ><br>
+<td class="blackcell"><div  ID="cell21" onclick="Game.chkMove(2,1)"></div>
+<td class="redcell"  ><br>
+<td class="blackcell"><div  ID="cell23" onclick="Game.chkMove(2,3)"></div>
+<td class="redcell"  ><br>
+<td class="blackcell"><div  ID="cell25" onclick="Game.chkMove(2,5)"></div>
+<td class="redcell"  ><br>
+<td class="blackcell"><div  ID="cell27" onclick="Game.chkMove(2,7)"></div>
+
+<tr>
+<td class="blackcell"><div  ID="cell30" onclick="Game.chkMove(3,0)"></div>
+<td class="redcell"  ><br>
+<td class="blackcell"><div  ID="cell32" onclick="Game.chkMove(3,2)"></div>
+<td class="redcell"  ><br>
+<td class="blackcell"><div  ID="cell34" onclick="Game.chkMove(3,4)"></div>
+<td class="redcell"  ><br>
+<td class="blackcell"><div  ID="cell36" onclick="Game.chkMove(3,6)"></div>
+<td class="redcell"  ><br>
+
+<tr>
+<td class="redcell"  ><br>
+<td class="blackcell"><div  ID="cell41" onclick="Game.chkMove(4,1)"><br></div>
+<td class="redcell"  ><br>
+<td class="blackcell"><div  ID="cell43" onclick="Game.chkMove(4,3)"><br></div>
+<td class="redcell"  ><br>
+<td class="blackcell"><div  ID="cell45" onclick="Game.chkMove(4,5)"><br></div>
+<td class="redcell"  ><br>
+<td class="blackcell"><div  ID="cell47" onclick="Game.chkMove(4,7)"><br></div>
+
+<tr>
+<td class="blackcell"><div  ID="cell50" onclick="Game.chkMove(5,0)"><br></div>
+<td class="redcell"  ><br>
+<td class="blackcell"><div  ID="cell52" onclick="Game.chkMove(5,2)"><br></div>
+<td class="redcell"  ><br>
+<td class="blackcell"><div  ID="cell54" onclick="Game.chkMove(5,4)"><br></div>
+<td class="redcell"  ><br>
+<td class="blackcell"><div  ID="cell56" onclick="Game.chkMove(5,6)"><br></div>
+<td class="redcell"  ><br>
+
+<tr>
+<td class="redcell"  ><br>
+<td class="blackcell"><div  ID="cell61" onclick="Game.chkMove(6,1)"></div>
+<td class="redcell"  ><br>
+<td class="blackcell"><div  ID="cell63" onclick="Game.chkMove(6,3)"></div>
+<td class="redcell"  ><br>
+<td class="blackcell"><div  ID="cell65" onclick="Game.chkMove(6,5)"></div>
+<td class="redcell"  ><br>
+<td class="blackcell"><div  ID="cell67" onclick="Game.chkMove(6,7)"></div>
+
+<tr>
+<td class="blackcell"><div  ID="cell70" onclick="Game.chkMove(7,0)"></div>
+<td class="redcell"  ><br>
+<td class="blackcell"><div  ID="cell72" onclick="Game.chkMove(7,2)"></div>
+<td class="redcell"  ><br>
+<td class="blackcell"><div  ID="cell74" onclick="Game.chkMove(7,4)"></div>
+<td class="redcell"  ><br>
+<td class="blackcell"><div  ID="cell76" onclick="Game.chkMove(7,6)"></div>
+<td class="redcell"  ><br>
+
+<tr>
+<td colspan=8 class="redstat"><b><div  ID="RedSide">...</div></b>
+</table>
+<ul>
+<li><a href="chk094i.htm">interactive (x2) game</a>
+<li><a href="chk094a.htm">automated game</a>
+</ul>
+</body>
+</html>
