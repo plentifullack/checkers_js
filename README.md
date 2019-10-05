@@ -1,2 +1,4 @@
 # checkers_js
-simple webpage implements checkers game with old school javascript
+simple html4 webpage checkers game implemented several years with what's now fairly old school javascript
+
+![diagram](https://github.com/plentifullack/checkers_js/blob/master/checkers.gif "class diagram")
